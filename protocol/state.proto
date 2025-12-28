@@ -1,0 +1,17 @@
+syntax = "proto3";
+package miniarena;
+
+// 说明：为便于快速跑通，本项目线上消息采用 JSON。
+// 该 proto 仅作为未来扩展的协议定义示例。
+
+message PlayerState {
+  string id = 1;
+  double x = 2;
+  double y = 3;
+}
+
+message StateMessage {
+  string type = 1;               // 固定为 "state"
+  repeated PlayerState players = 2;
+}
+
