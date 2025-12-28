@@ -40,6 +40,9 @@ type Room struct {
 
 	// 阶段5：上一帧广播的权威状态，用于增量计算
 	lastBroadcast map[PlayerID]PlayerState
+
+	// 监控指标
+	metrics *RoomMetrics
 }
 
 // NewRoom 创建房间，初始化数据结构
@@ -64,6 +67,7 @@ func NewRoom(id string) *Room {
 		// 阶段4：最近快照
 		lastKnown:     make(map[PlayerID]PlayerState),
 		lastBroadcast: make(map[PlayerID]PlayerState),
+		metrics:       &RoomMetrics{},
 	}
 }
 
@@ -97,6 +101,7 @@ func (r *Room) OnInput(in Input) {
 	if r.simulateDropProb > 0 && r.rng.Float64() < r.simulateDropProb {
 		// 丢弃该条输入，模拟丢包（调试）
 		Log.Debugf("drop input: player=%s seq=%d", string(in.PlayerID), in.Seq)
+		r.metrics.IncDropsSimulated()
 		return
 	}
 	min, max := r.simulateDelayMinMs, r.simulateDelayMaxMs
@@ -114,6 +119,7 @@ func (r *Room) OnInput(in Input) {
 		default:
 			// 丢弃：避免背压影响世界推进
 			Log.Warnf("discard due to chan full: player=%s seq=%d", string(in.PlayerID), in.Seq)
+			r.metrics.IncChanFullDiscarded()
 		}
 	})
 }
@@ -130,6 +136,7 @@ func (r *Room) ProcessInputs() {
 				if in.Seq > 0 {
 					if last := r.lastSeqProcessed[in.PlayerID]; in.Seq <= last {
 						Log.Debugf("ignore old seq: player=%s seq=%d last=%d", string(in.PlayerID), in.Seq, last)
+						r.metrics.IncOldSeqIgnored()
 						break
 					}
 				}
@@ -138,12 +145,14 @@ func (r *Room) ProcessInputs() {
 				if cnt >= r.maxInputsPerTick {
 					// 超限输入丢弃
 					Log.Warnf("rate limit: player=%s seq=%d cnt=%d", string(in.PlayerID), in.Seq, cnt)
+					r.metrics.IncRateLimited()
 				} else {
 					r.applyMove(p, in.Command) // 每个输入仅移动一步
 					r.inputsAcceptedThisTick[in.PlayerID] = cnt + 1
 					if in.Seq > 0 {
 						r.lastSeqProcessed[in.PlayerID] = in.Seq
 						Log.Infof("accept input: player=%s seq=%d cnt=%d", string(in.PlayerID), in.Seq, cnt+1)
+						r.metrics.IncAccepted()
 					}
 				}
 			}

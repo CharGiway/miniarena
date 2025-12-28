@@ -29,6 +29,9 @@ func main() {
 	mux.HandleFunc("/ws", server.HandleWS)
 	// 前后端分离：将 / 映射到 web 目录的静态资源
 	mux.Handle("/", http.FileServer(http.Dir("web")))
+	// 管理与监控接口
+	mux.HandleFunc("/admin/config", server.HandleAdminConfig)
+	mux.HandleFunc("/metrics", server.HandleMetrics)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})

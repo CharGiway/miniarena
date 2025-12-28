@@ -20,10 +20,15 @@ func (r *Room) StartTicker() {
 		defer ticker.Stop()
 		for range ticker.C {
 			// 核心循环：处理输入 → 更新世界 → 广播结果
+			start := time.Now()
 			r.BeginTick() // 同一 Tick 时间线：重置输入计数等帧内状态
 			r.ProcessInputs()
 			r.UpdateWorld()
 			r.BroadcastDelta()
+			elapsed := time.Since(start)
+			if r.metrics != nil {
+				r.metrics.AddTick(elapsed.Nanoseconds())
+			}
 		}
 	}()
 }
