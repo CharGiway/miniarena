@@ -1,0 +1,37 @@
+# OS/IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Go build artifacts
+bin/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Logs and runtime files
+*.log
+app.log
+logs/
+log/
+*.pid
+*.tmp
+*.swp
+*.swo
+*.trace
+*.prof
+
+# Coverage
+coverage/
+*.cov
+
+# Frontend (if later added)
+node_modules/
+dist/
+

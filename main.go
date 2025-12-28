@@ -2,8 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +15,11 @@ func main() {
 	var addr string
 	flag.StringVar(&addr, "addr", ":8080", "server listen address, e.g. :8080")
 	flag.Parse()
+	// 使用第三方 zap 日志库写入 app.log（带滚动）
+	if err := server.InitLogger("app.log"); err != nil {
+		panic(err)
+	}
+	defer server.SyncLogger()
 
 	rm := server.GetRoomManager()
 	// 先预创建一个默认房间，便于快速试跑
@@ -33,9 +36,9 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
-		log.Printf("MiniArena listening on %s; open http://localhost%v/", addr, addr)
+		server.Log.Infof("MiniArena listening on %s; open http://localhost%v/", addr, addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
+			server.Log.Fatalf("listen: %v", err)
 		}
 	}()
 
@@ -43,5 +46,5 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	fmt.Println("\nShutting down...")
+	server.Log.Info("Shutting down...")
 }

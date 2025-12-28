@@ -81,8 +81,12 @@ function startAnimation() {
 
 function connect() {
   if (ws) { try { ws.close(); } catch(e){} ws = null; }
-  const player = document.getElementById('player').value || 'alice';
+  const player = (document.getElementById('player').value || 'alice').trim();
   myId = player;
+  // 断线重连时重置本地序列与未确认输入，避免不一致
+  nextSeq = 1;
+  pendingInputs = [];
+  localPlayers = {};
   const url = 'ws://' + location.host + '/ws?room=room-1&player=' + encodeURIComponent(player);
   log('connecting ' + url);
   ws = new WebSocket(url);
@@ -92,10 +96,11 @@ function connect() {
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.type === 'state') {
+      if (msg.type === 'state' || msg.type === 'snapshot') {
         // 权威状态（服务器裁决）
         const auth = {};
         for (const p of (msg.players || [])) auth[p.id] = {x:p.x, y:p.y};
+        log(`recv ${msg.type} tick=${msg.tick} myId=${myId} ack=${msg.acks?msg.acks[myId]:0} players=[${Object.keys(auth).join(',')}]`);
         // 初始化 localPlayers 中其他人的位置为权威值
         for (const id of Object.keys(auth)) {
           if (id !== myId) localPlayers[id] = {x:auth[id].x, y:auth[id].y};
@@ -104,14 +109,22 @@ function connect() {
         let ack = 0;
         if (msg.acks && msg.acks[myId] != null) ack = msg.acks[myId];
         pendingInputs = pendingInputs.filter(it => it.seq > ack);
+        // 关键修正：根据服务器确认序列推进 nextSeq，避免重连后继续从 1 发送被判旧包
+        if (ack + 1 > nextSeq) {
+          nextSeq = ack + 1;
+          log(`advance nextSeq to ${nextSeq} by ack=${ack}`);
+        }
+        log(`pending after ack=${ack}: ${pendingInputs.map(it=>it.seq).join(',')}`);
         // 以服务器位置为历史起点，重演未确认输入
         let desired = auth[myId] ? {x:auth[myId].x, y:auth[myId].y} : localPlayers[myId] || {x:50, y:50};
+        if (!auth[myId]) log('auth missing for myId, fallback to local/default');
         for (const it of pendingInputs) {
           if (it.cmd === 'up') desired.y -= 1;
           else if (it.cmd === 'down') desired.y += 1;
           else if (it.cmd === 'left') desired.x -= 1;
           else if (it.cmd === 'right') desired.x += 1;
         }
+        log(`desired target: (${desired.x},${desired.y})`);
         // 目标位置（平滑拉回）
         reconcileTarget = desired;
         // 如果本地没有我的位置，则初始化为服务器位置，避免瞬移过大
@@ -145,6 +158,7 @@ window.addEventListener('keydown', (e) => {
     // 记录未确认输入
     const seq = nextSeq++;
     pendingInputs.push({seq, cmd});
+    log(`send input: id=${myId} cmd=${cmd} seq=${seq}`);
     // 发送意图及序列号
     ws.send(JSON.stringify({type:'move', command:cmd, seq}));
   }

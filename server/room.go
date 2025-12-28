@@ -34,6 +34,9 @@ type Room struct {
 	// 阶段3：Tick 序号与输入确认序列
 	tickSeq          int64
 	lastSeqProcessed map[PlayerID]int64
+
+	// 阶段4：玩家最近快照（断线重连恢复位置）
+	lastKnown map[PlayerID]PlayerState
 }
 
 // NewRoom 创建房间，初始化数据结构
@@ -55,12 +58,19 @@ func NewRoom(id string) *Room {
 		maxInputsPerTick:       1,
 		// 阶段3：确认序列
 		lastSeqProcessed: make(map[PlayerID]int64),
+		// 阶段4：最近快照
+		lastKnown: make(map[PlayerID]PlayerState),
 	}
 }
 
 // JoinPlayer 将玩家加入房间
 func (r *Room) JoinPlayer(id PlayerID, conn *ClientConn) *Player {
-	p := &Player{ID: id, X: 50, Y: 50, Dir: DirNone, Conn: conn}
+	// 若存在历史快照，按最近位置恢复；否则默认居中
+	initX, initY := 50.0, 50.0
+	if st, ok := r.lastKnown[id]; ok {
+		initX, initY = st.X, st.Y
+	}
+	p := &Player{ID: id, X: initX, Y: initY, Dir: DirNone, Conn: conn}
 	r.Players[id] = p
 	return p
 }
@@ -71,6 +81,8 @@ func (r *Room) LeavePlayer(id PlayerID) {
 		if p.Conn != nil {
 			p.Conn.Close()
 		}
+		// 记录最近位置快照，供断线重连恢复
+		r.lastKnown[id] = PlayerState{ID: string(id), X: p.X, Y: p.Y}
 		delete(r.Players, id)
 	}
 }
@@ -79,7 +91,8 @@ func (r *Room) LeavePlayer(id PlayerID) {
 func (r *Room) OnInput(in Input) {
 	// Phase 2：引入随机延迟与随机丢弃（延迟的是输入进入世界的时间）
 	if r.simulateDropProb > 0 && r.rng.Float64() < r.simulateDropProb {
-		// 丢弃该条输入，模拟丢包
+		// 丢弃该条输入，模拟丢包（调试）
+		Log.Debugf("drop input: player=%s seq=%d", string(in.PlayerID), in.Seq)
 		return
 	}
 	min, max := r.simulateDelayMinMs, r.simulateDelayMaxMs
@@ -96,6 +109,7 @@ func (r *Room) OnInput(in Input) {
 		case r.inputChan <- in:
 		default:
 			// 丢弃：避免背压影响世界推进
+			Log.Warnf("discard due to chan full: player=%s seq=%d", string(in.PlayerID), in.Seq)
 		}
 	})
 }
@@ -111,6 +125,7 @@ func (r *Room) ProcessInputs() {
 				// 阶段3：去重/乱序保护（按客户端序列号）
 				if in.Seq > 0 {
 					if last := r.lastSeqProcessed[in.PlayerID]; in.Seq <= last {
+						Log.Debugf("ignore old seq: player=%s seq=%d last=%d", string(in.PlayerID), in.Seq, last)
 						break
 					}
 				}
@@ -118,11 +133,13 @@ func (r *Room) ProcessInputs() {
 				cnt := r.inputsAcceptedThisTick[in.PlayerID]
 				if cnt >= r.maxInputsPerTick {
 					// 超限输入丢弃
+					Log.Warnf("rate limit: player=%s seq=%d cnt=%d", string(in.PlayerID), in.Seq, cnt)
 				} else {
 					r.applyMove(p, in.Command) // 每个输入仅移动一步
 					r.inputsAcceptedThisTick[in.PlayerID] = cnt + 1
 					if in.Seq > 0 {
 						r.lastSeqProcessed[in.PlayerID] = in.Seq
+						Log.Infof("accept input: player=%s seq=%d cnt=%d", string(in.PlayerID), in.Seq, cnt+1)
 					}
 				}
 			}
@@ -160,6 +177,32 @@ func (r *Room) Broadcast() {
 			p.Conn.Enqueue(b)
 		}
 	}
+}
+
+// SendSnapshotTo 向指定玩家发送一次权威快照（初连/重连）
+func (r *Room) SendSnapshotTo(id PlayerID) {
+	p, ok := r.Players[id]
+	if !ok || p.Conn == nil {
+		return
+	}
+	world := make([]PlayerState, 0, len(r.Players))
+	for _, pl := range r.Players {
+		world = append(world, PlayerState{ID: string(pl.ID), X: pl.X, Y: pl.Y})
+	}
+	acks := make(map[string]int64, len(r.lastSeqProcessed))
+	for pid, seq := range r.lastSeqProcessed {
+		acks[string(pid)] = seq
+	}
+	payload := struct {
+		Type    string           `json:"type"`
+		Tick    int64            `json:"tick"`
+		Players []PlayerState    `json:"players"`
+		Acks    map[string]int64 `json:"acks"`
+	}{Type: "snapshot", Tick: r.tickSeq, Players: world, Acks: acks}
+	b, _ := json.Marshal(payload)
+	// 打印快照（调试）
+	Log.Debugf("snapshot: %s", string(b))
+	p.Conn.Enqueue(b)
 }
 
 // applyMove 执行一次移动并进行越界裁剪

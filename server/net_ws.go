@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -87,6 +86,15 @@ func (c *ClientConn) readPump(room *Room, playerID PlayerID) {
 		default:
 			dir = DirNone
 		}
+		// 调试日志：观察输入是否被识别
+		// 示例：input player=alice type=move cmd=right seq=123 dir=DirRight
+		// 注意：线上应调整为更轻量的日志
+		// 使用标准 log 以避免额外依赖
+		if dir == DirNone {
+			Log.Debugf("input unrecognized: player=%s type=%s cmd=%s seq=%d", playerID, im.Type, im.Command, im.Seq)
+		} else {
+			Log.Debugf("input recv: player=%s type=%s cmd=%s seq=%d", playerID, im.Type, im.Command, im.Seq)
+		}
 		room.OnInput(Input{PlayerID: playerID, Command: dir, Seq: im.Seq})
 	}
 }
@@ -114,7 +122,7 @@ func HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("upgrade error: %v", err)
+		Log.Errorf("upgrade error: %v", err)
 		return
 	}
 
@@ -126,4 +134,7 @@ func HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	go client.writePump()
 	go client.readPump(room, PlayerID(playerID))
+
+	// 初次连接/重连时，立即发送一次权威快照，便于客户端对齐并重演未确认输入
+	room.SendSnapshotTo(PlayerID(playerID))
 }
