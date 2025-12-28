@@ -37,6 +37,9 @@ type Room struct {
 
 	// 阶段4：玩家最近快照（断线重连恢复位置）
 	lastKnown map[PlayerID]PlayerState
+
+	// 阶段5：上一帧广播的权威状态，用于增量计算
+	lastBroadcast map[PlayerID]PlayerState
 }
 
 // NewRoom 创建房间，初始化数据结构
@@ -59,7 +62,8 @@ func NewRoom(id string) *Room {
 		// 阶段3：确认序列
 		lastSeqProcessed: make(map[PlayerID]int64),
 		// 阶段4：最近快照
-		lastKnown: make(map[PlayerID]PlayerState),
+		lastKnown:     make(map[PlayerID]PlayerState),
+		lastBroadcast: make(map[PlayerID]PlayerState),
 	}
 }
 
@@ -176,6 +180,65 @@ func (r *Room) Broadcast() {
 		if p.Conn != nil {
 			p.Conn.Enqueue(b)
 		}
+	}
+}
+
+// BroadcastDelta 只广播变化的玩家，以及被移除的玩家列表
+func (r *Room) BroadcastDelta() {
+	// 计算变化与移除
+	changed := make([]PlayerState, 0, len(r.Players))
+	removed := make([]string, 0)
+
+	// 被移除的玩家：存在于 lastBroadcast 但不在当前 Players
+	for pid := range r.lastBroadcast {
+		if _, ok := r.Players[pid]; !ok {
+			removed = append(removed, string(pid))
+		}
+	}
+	// 发生变化或新增的玩家
+	for pid, p := range r.Players {
+		prev, had := r.lastBroadcast[pid]
+		if !had || prev.X != p.X || prev.Y != p.Y {
+			changed = append(changed, PlayerState{ID: string(pid), X: p.X, Y: p.Y})
+		}
+	}
+
+	// 如果变化覆盖率很高，降级为全量（state）
+	if len(changed) >= len(r.Players) {
+		r.Broadcast()
+		// 同步 lastBroadcast 为当前全量
+		r.lastBroadcast = make(map[PlayerID]PlayerState, len(r.Players))
+		for pid, p := range r.Players {
+			r.lastBroadcast[pid] = PlayerState{ID: string(pid), X: p.X, Y: p.Y}
+		}
+		return
+	}
+
+	acks := make(map[string]int64, len(r.lastSeqProcessed))
+	for pid, seq := range r.lastSeqProcessed {
+		acks[string(pid)] = seq
+	}
+	payload := struct {
+		Type    string           `json:"type"`
+		Tick    int64            `json:"tick"`
+		Players []PlayerState    `json:"players"` // changed only
+		Removed []string         `json:"removed"`
+		Acks    map[string]int64 `json:"acks"`
+	}{Type: "delta", Tick: r.tickSeq, Players: changed, Removed: removed, Acks: acks}
+
+	b, _ := json.Marshal(payload)
+	for _, p := range r.Players {
+		if p.Conn != nil {
+			p.Conn.Enqueue(b)
+		}
+	}
+
+	// 更新 lastBroadcast：删除 removed，写入 changed
+	for _, id := range removed {
+		delete(r.lastBroadcast, PlayerID(id))
+	}
+	for _, st := range changed {
+		r.lastBroadcast[PlayerID(st.ID)] = st
 	}
 }
 

@@ -11,6 +11,7 @@ let pendingInputs = []; // {seq, cmd}
 let localPlayers = {};  // 客户端当前展示的世界（含预测）
 let reconcileTarget = null; // 我的目标位置（服务器裁决+未确认重演）
 let animating = false;
+let lastAuthMy = null; // 最近一次服务器确认的我的权威位置
 
 function log(msg) {
   const p = document.createElement('div');
@@ -115,9 +116,11 @@ function connect() {
           log(`advance nextSeq to ${nextSeq} by ack=${ack}`);
         }
         log(`pending after ack=${ack}: ${pendingInputs.map(it=>it.seq).join(',')}`);
-        // 以服务器位置为历史起点，重演未确认输入
-        let desired = auth[myId] ? {x:auth[myId].x, y:auth[myId].y} : localPlayers[myId] || {x:50, y:50};
-        if (!auth[myId]) log('auth missing for myId, fallback to local/default');
+        // 刷新我的权威位置
+        if (auth[myId]) lastAuthMy = {x:auth[myId].x, y:auth[myId].y};
+        // 以服务器最近位置为历史起点，重演未确认输入
+        let desired = lastAuthMy ? {x:lastAuthMy.x, y:lastAuthMy.y} : localPlayers[myId] || {x:50, y:50};
+        if (!auth[myId]) log('auth missing for myId, fallback to lastAuth/local');
         for (const it of pendingInputs) {
           if (it.cmd === 'up') desired.y -= 1;
           else if (it.cmd === 'down') desired.y += 1;
@@ -129,6 +132,40 @@ function connect() {
         reconcileTarget = desired;
         // 如果本地没有我的位置，则初始化为服务器位置，避免瞬移过大
         if (!localPlayers[myId] && auth[myId]) localPlayers[myId] = {x:auth[myId].x, y:auth[myId].y};
+        startAnimation();
+      }
+      else if (msg.type === 'delta') {
+        const auth = {};
+        for (const p of (msg.players || [])) auth[p.id] = {x:p.x, y:p.y};
+        log(`recv delta tick=${msg.tick} myId=${myId} ack=${msg.acks?msg.acks[myId]:0} changed=[${Object.keys(auth).join(',')}] removed=[${(msg.removed||[]).join(',')}]`);
+        // 应用 removed
+        for (const id of (msg.removed || [])) {
+          delete localPlayers[id];
+          if (id === myId) lastAuthMy = null;
+        }
+        // 应用 changed 到其他人
+        for (const id of Object.keys(auth)) {
+          if (id !== myId) localPlayers[id] = {x:auth[id].x, y:auth[id].y};
+        }
+        // ack 推进与未确认过滤
+        let ack = 0;
+        if (msg.acks && msg.acks[myId] != null) ack = msg.acks[myId];
+        pendingInputs = pendingInputs.filter(it => it.seq > ack);
+        if (ack + 1 > nextSeq) {
+          nextSeq = ack + 1;
+          log(`advance nextSeq to ${nextSeq} by ack=${ack}`);
+        }
+        // 权威起点：如 delta 包含我的变化，则刷新 lastAuthMy
+        if (auth[myId]) lastAuthMy = {x:auth[myId].x, y:auth[myId].y};
+        let desired = lastAuthMy ? {x:lastAuthMy.x, y:lastAuthMy.y} : (localPlayers[myId] || {x:50, y:50});
+        for (const it of pendingInputs) {
+          if (it.cmd === 'up') desired.y -= 1;
+          else if (it.cmd === 'down') desired.y += 1;
+          else if (it.cmd === 'left') desired.x -= 1;
+          else if (it.cmd === 'right') desired.x += 1;
+        }
+        reconcileTarget = desired;
+        if (!localPlayers[myId]) localPlayers[myId] = desired;
         startAnimation();
       }
     } catch (e) {}
@@ -149,7 +186,7 @@ window.addEventListener('keydown', (e) => {
   if (cmd) {
     e.preventDefault();
     // 客户端先动（预测）
-    if (!localPlayers[myId]) localPlayers[myId] = {x:50, y:50};
+    if (!localPlayers[myId]) localPlayers[myId] = lastAuthMy ? {x:lastAuthMy.x, y:lastAuthMy.y} : {x:50, y:50};
     if (cmd === 'up') localPlayers[myId].y -= 1;
     else if (cmd === 'down') localPlayers[myId].y += 1;
     else if (cmd === 'left') localPlayers[myId].x -= 1;

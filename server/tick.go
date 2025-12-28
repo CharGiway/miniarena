@@ -23,7 +23,7 @@ func (r *Room) StartTicker() {
 			r.BeginTick() // 同一 Tick 时间线：重置输入计数等帧内状态
 			r.ProcessInputs()
 			r.UpdateWorld()
-			r.Broadcast()
+			r.BroadcastDelta()
 		}
 	}()
 }
