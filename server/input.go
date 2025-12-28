@@ -4,6 +4,7 @@ package server
 type Input struct {
     PlayerID PlayerID
     Command  Direction
+    Seq      int64 // 客户端本地序列号，用于去重与确认
 }
 
 // 入站输入的简单 JSON 结构（WebSocket 文本消息）
@@ -11,5 +12,5 @@ type Input struct {
 type InputMessage struct {
     Type    string `json:"type"`
     Command string `json:"command"`
+    Seq     int64  `json:"seq,omitempty"`
 }
-

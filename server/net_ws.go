@@ -87,7 +87,7 @@ func (c *ClientConn) readPump(room *Room, playerID PlayerID) {
 		default:
 			dir = DirNone
 		}
-		room.OnInput(Input{PlayerID: playerID, Command: dir})
+		room.OnInput(Input{PlayerID: playerID, Command: dir, Seq: im.Seq})
 	}
 }
 

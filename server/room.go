@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"math/rand"
+	"time"
 )
 
 // Room 房间世界：权威状态维护在内存，单线程 Tick 推进
@@ -12,12 +14,26 @@ type Room struct {
 	inputChan chan Input
 	leaveChan chan PlayerID
 
+	// Phase 2：网络模拟与裁决
+	simulateDelayMinMs int     // 输入延迟下限（毫秒）
+	simulateDelayMaxMs int     // 输入延迟上限（毫秒）
+	simulateDropProb   float64 // 随机丢弃比例（0~1）
+	rng                *rand.Rand
+
+	// 每 Tick 输入限流
+	inputsAcceptedThisTick map[PlayerID]int
+	maxInputsPerTick       int
+
 	// 配置：世界边界与每 Tick 移动步长
 	width  float64
 	height float64
 	step   float64
 
 	tickerStarted bool
+
+	// 阶段3：Tick 序号与输入确认序列
+	tickSeq          int64
+	lastSeqProcessed map[PlayerID]int64
 }
 
 // NewRoom 创建房间，初始化数据结构
@@ -29,7 +45,16 @@ func NewRoom(id string) *Room {
 		leaveChan: make(chan PlayerID, 64),
 		width:     100,
 		height:    100,
-		step:      1, // 每个 Tick 移动 1 单位
+		step:      1, // 每次输入仅移动 1 单位
+		// Phase 2 默认参数
+		simulateDelayMinMs:     150,
+		simulateDelayMaxMs:     300,
+		simulateDropProb:       0.10,
+		rng:                    rand.New(rand.NewSource(time.Now().UnixNano())),
+		inputsAcceptedThisTick: make(map[PlayerID]int),
+		maxInputsPerTick:       1,
+		// 阶段3：确认序列
+		lastSeqProcessed: make(map[PlayerID]int64),
 	}
 }
 
@@ -52,12 +77,27 @@ func (r *Room) LeavePlayer(id PlayerID) {
 
 // OnInput 入站输入（不立即改变位置），仅记录意图，等下一次 Tick 处理
 func (r *Room) OnInput(in Input) {
-	// 不阻塞：输入拥塞时丢弃最旧（由通道容量控制），保证 Tick 准时
-	select {
-	case r.inputChan <- in:
-	default:
-		// 丢弃：为了实时性，避免背压影响世界推进
+	// Phase 2：引入随机延迟与随机丢弃（延迟的是输入进入世界的时间）
+	if r.simulateDropProb > 0 && r.rng.Float64() < r.simulateDropProb {
+		// 丢弃该条输入，模拟丢包
+		return
 	}
+	min, max := r.simulateDelayMinMs, r.simulateDelayMaxMs
+	if max < min {
+		max = min
+	}
+	delayMs := min
+	if max > min {
+		delayMs = min + r.rng.Intn(max-min+1)
+	}
+	time.AfterFunc(time.Duration(delayMs)*time.Millisecond, func() {
+		// 不阻塞：入口通道满则丢弃，保证 Tick 准时
+		select {
+		case r.inputChan <- in:
+		default:
+			// 丢弃：避免背压影响世界推进
+		}
+	})
 }
 
 // ProcessInputs 处理当前帧的所有输入意图（非阻塞 drain）
@@ -68,7 +108,23 @@ func (r *Room) ProcessInputs() {
 			r.LeavePlayer(pid)
 		case in := <-r.inputChan:
 			if p, ok := r.Players[in.PlayerID]; ok {
-				r.applyMove(p, in.Command) // 每个输入仅移动一步
+				// 阶段3：去重/乱序保护（按客户端序列号）
+				if in.Seq > 0 {
+					if last := r.lastSeqProcessed[in.PlayerID]; in.Seq <= last {
+						break
+					}
+				}
+				// 每 Tick 限流：超额输入忽略（权威裁决）
+				cnt := r.inputsAcceptedThisTick[in.PlayerID]
+				if cnt >= r.maxInputsPerTick {
+					// 超限输入丢弃
+				} else {
+					r.applyMove(p, in.Command) // 每个输入仅移动一步
+					r.inputsAcceptedThisTick[in.PlayerID] = cnt + 1
+					if in.Seq > 0 {
+						r.lastSeqProcessed[in.PlayerID] = in.Seq
+					}
+				}
 			}
 		default:
 			return
@@ -87,10 +143,16 @@ func (r *Room) Broadcast() {
 	for _, p := range r.Players {
 		snapshot = append(snapshot, PlayerState{ID: string(p.ID), X: p.X, Y: p.Y})
 	}
+	acks := make(map[string]int64, len(r.lastSeqProcessed))
+	for pid, seq := range r.lastSeqProcessed {
+		acks[string(pid)] = seq
+	}
 	payload := struct {
-		Type    string        `json:"type"`
-		Players []PlayerState `json:"players"`
-	}{Type: "state", Players: snapshot}
+		Type    string           `json:"type"`
+		Tick    int64            `json:"tick"`
+		Players []PlayerState    `json:"players"`
+		Acks    map[string]int64 `json:"acks"`
+	}{Type: "state", Tick: r.tickSeq, Players: snapshot, Acks: acks}
 
 	b, _ := json.Marshal(payload)
 	for _, p := range r.Players {
@@ -132,4 +194,10 @@ func (r *Room) applyMove(p *Player, dir Direction) {
 func (r *Room) RequestLeave(pid PlayerID) {
 	// 为保证移除一定生效，这里采用阻塞式写入（通道有容量，避免死锁）
 	r.leaveChan <- pid
+}
+
+// BeginTick 每帧开始时重置输入计数，保证同一时间线上的裁决一致
+func (r *Room) BeginTick() {
+	r.tickSeq++
+	r.inputsAcceptedThisTick = make(map[PlayerID]int)
 }
